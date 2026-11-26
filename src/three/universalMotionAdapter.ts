@@ -28,6 +28,7 @@ import {
 } from './proceduralRigAnimator';
 import {
   MOTION_SLOT_META_BY_SLOT,
+  buildStandardMotionPresetTemplate,
 } from '../data/motionLibrary';
 import type {
   BonePoseAngles,
@@ -1102,7 +1103,10 @@ export function resolveMotionPresetForRuntime(opts: {
     if (p && p.keyframes.length > 0) return p;
   }
 
-  return null;
+  return buildStandardMotionPresetTemplate(slot, {}, {
+    rigArchetype: monsterBp ? 'quadruped' : 'humanoid',
+    actorCategory,
+  });
 }
 
 function getPoseAnglesByAliases(
@@ -1147,9 +1151,11 @@ export function applyMotionPresetToHeroRigRuntime(
 
   if (!upperBodyOnly) {
     blendEuler(rig.bodyPivot, getPoseAnglesByAliases(bones, ['Hips', 'hips', 'Pelvis']));
-    if (Math.abs(hipsOffsetY) > 0.0005) {
+    const isIdleOrBreath = preset.slot === 'idle' || preset.slot === 'sleep' || preset.slot === 'sit' || preset.slot === 'talk';
+    const effectiveHipsY = isIdleOrBreath ? 0 : hipsOffsetY;
+    if (Math.abs(effectiveHipsY) > 0.0005) {
       const refRatio = preset.hipsHeightRef && preset.hipsHeightRef > 0.05 ? 0.56 / preset.hipsHeightRef : 1;
-      const targetY = Math.max(0.05, baseBodyY + hipsOffsetY * THREE.MathUtils.clamp(refRatio, 0.4, 2.2));
+      const targetY = Math.max(0.05, baseBodyY + effectiveHipsY * THREE.MathUtils.clamp(refRatio, 0.4, 2.2));
       rig.bodyPivot.position.y = THREE.MathUtils.lerp(rig.bodyPivot.position.y, targetY, w);
     }
     blendEuler(rig.legL, getPoseAnglesByAliases(bones, ['LeftUpperLeg', 'leftUpperLeg']));
@@ -1197,8 +1203,10 @@ export function applyMotionPresetToBaddieRigRuntime(
   };
 
   blendRot(rig.bodyPivot, ['Hips', 'hips', 'MonsterBodyPivot']);
-  if (Math.abs(hipsOffsetY) > 0.0005) {
-    rig.bodyPivot.position.y = THREE.MathUtils.lerp(rig.bodyPivot.position.y, Math.max(0.04, baseY + hipsOffsetY), w);
+  const isIdleOrBreath = preset.slot === 'idle' || preset.slot === 'sleep' || preset.slot === 'sit' || preset.slot === 'talk';
+  const effectiveHipsY = isIdleOrBreath ? 0 : hipsOffsetY;
+  if (Math.abs(effectiveHipsY) > 0.0005) {
+    rig.bodyPivot.position.y = THREE.MathUtils.lerp(rig.bodyPivot.position.y, Math.max(0.04, baseY + effectiveHipsY), w);
   }
   blendRot(rig.torso, ['Spine', 'spine', 'Chest', 'chest']);
   blendRot(rig.head, ['Head', 'head']);

@@ -317,7 +317,9 @@ export function sampleMotionPresetToPose(
 
   const hA = keyA.hipsOffsetY ?? 0;
   const hB = keyB.hipsOffsetY ?? 0;
-  const hipsOffsetY = Math.round(THREE.MathUtils.lerp(hA, hB, alpha) * 1000) / 1000;
+  const rawHipsY = Math.round(THREE.MathUtils.lerp(hA, hB, alpha) * 1000) / 1000;
+  const isIdleOrBreath = preset.slot === 'idle' || preset.slot === 'sleep' || preset.slot === 'sit' || preset.slot === 'talk';
+  const hipsOffsetY = isIdleOrBreath ? 0 : rawHipsY;
   return { bones, hipsOffsetY };
 }
 
@@ -1236,7 +1238,9 @@ export class ProceduralRigController {
       cap.node.quaternion.copy(_qDeltaLocal).multiply(cap.restQuat);
     }
 
-    const hipsY = THREE.MathUtils.lerp(keyA.hipsOffsetY ?? 0, keyB.hipsOffsetY ?? 0, alpha);
+    const rawHipsY = THREE.MathUtils.lerp(keyA.hipsOffsetY ?? 0, keyB.hipsOffsetY ?? 0, alpha);
+    const isIdleOrBreath = preset.slot === 'idle' || preset.slot === 'sleep' || preset.slot === 'sit' || preset.slot === 'talk';
+    const hipsY = isIdleOrBreath ? 0 : rawHipsY;
     if (Math.abs(hipsY) > 0.0005) {
       const hipsName = this.settings.boneMap.hips;
       const hipsCap = hipsName ? this.allBones.get(hipsName) : undefined;
