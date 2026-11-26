@@ -471,6 +471,7 @@ function createVirtualInstanceWrapper(opts: {
         currentOverrideKind === 'poseSnapshot' ||
         (!currentOverrideKind && Boolean(currentDefaults[instance.currentSlot]));
       instance.activeDriver = isCustom ? 'custom' : 'procedural';
+      rootObject.updateMatrixWorld(true);
     },
     applyRigSettings: (next) => {
       rigSettings.mode = next.mode;

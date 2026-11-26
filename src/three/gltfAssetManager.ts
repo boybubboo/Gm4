@@ -1001,6 +1001,7 @@ export function instantiateCustomModel(
           instance.activeDriver = 'none';
         }
       }
+      scaledRoot.updateMatrixWorld(true);
     },
     applyRigSettings(next: CustomRigSettings) {
       const facingChanged = next.facingOffsetDeg !== instance.rigSettings.facingOffsetDeg;

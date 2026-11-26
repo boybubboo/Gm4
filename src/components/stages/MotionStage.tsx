@@ -152,6 +152,12 @@ function createBlankMotionDraft(slot: CustomClipSlot): CustomMotionPreset {
         bones: {},
         hipsOffsetY: 0,
       },
+      {
+        id: uid(),
+        time: 1,
+        bones: {},
+        hipsOffsetY: 0,
+      },
     ],
     updatedAt: new Date().toISOString(),
   };
@@ -448,7 +454,6 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
       boneNames.length === 0 ||
       savedPresetId !== null ||
       isDirtyPose ||
-      isPlaying ||
       !draft.sourcePresetId?.startsWith('builtin_')
     ) {
       return;
@@ -466,6 +471,9 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
       availableBoneNames: boneNames,
       hipsHeightRef: runtimeInfo?.hipsHeightRef,
     });
+    if (isPlaying) {
+      playStartNormRef.current = playhead;
+    }
     setDraft(rebuilt);
     const sampled = sampleMotionPresetToPose(rebuilt, playhead);
     setWorkingBones(sampled.bones);
@@ -581,9 +589,8 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
     });
   }, [compareOriginal, selectedActor, draft.sourcePresetId, draft.slot, effectiveRig, activeArchetype, boneNames, runtimeInfo?.hipsHeightRef]);
 
-  const effectiveTestOverride: RigTestOverride = useMemo(() => {
-    if (boneNames.length === 0) return null;
-    if (studioMode === 'gait') return null;
+  const playingOverride: RigTestOverride = useMemo(() => {
+    if (studioMode !== 'pose') return null;
     if (compareOriginal && builtInOriginalPreset) {
       return {
         kind: 'presetPreview',
@@ -600,22 +607,31 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
         playing: true,
       };
     }
-    return {
-      kind: 'poseSnapshot',
-      bones: workingBones,
-      hipsOffsetY: workingHipsY,
-    };
+    return null;
   }, [
-    boneNames.length,
     studioMode,
     compareOriginal,
     builtInOriginalPreset,
     isPlaying,
     draft,
     isPlaying ? 0 : playhead,
-    workingBones,
-    workingHipsY,
   ]);
+
+  const snapshotOverride: RigTestOverride = useMemo(() => {
+    if (studioMode !== 'pose' || playingOverride) return null;
+    if (boneNames.length === 0) return null;
+    return {
+      kind: 'poseSnapshot',
+      bones: workingBones,
+      hipsOffsetY: workingHipsY,
+    };
+  }, [studioMode, playingOverride, boneNames.length, workingBones, workingHipsY]);
+
+  const effectiveTestOverride: RigTestOverride = playingOverride ?? snapshotOverride;
+
+  const activePlaybackPresetRef = useRef<CustomMotionPreset>(draft);
+  activePlaybackPresetRef.current =
+    compareOriginal && builtInOriginalPreset ? builtInOriginalPreset : draft;
 
   const ghostStartPose = useMemo(() => {
     if (!showLoopGhost || !draft.loop || draft.keyframes.length === 0) return null;
@@ -801,31 +817,74 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
       setIsPlaying(false);
       setPlayhead(timeNorm);
       setActiveSavedPoseId(null);
-      const sampled = sampleMotionPresetToPose(draft, timeNorm);
+      const activePreset =
+        compareOriginal && builtInOriginalPreset ? builtInOriginalPreset : draft;
+      const sampled = sampleMotionPresetToPose(activePreset, timeNorm);
       setWorkingBones(sampled.bones);
       setWorkingHipsY(sampled.hipsOffsetY);
       setIsDirtyPose(false);
     },
-    [draft]
+    [compareOriginal, builtInOriginalPreset, draft]
   );
+
+  const handlePlayheadTick = useCallback((timeNorm: number) => {
+    setPlayhead(timeNorm);
+    const sampled = sampleMotionPresetToPose(activePlaybackPresetRef.current, timeNorm);
+    setWorkingBones(sampled.bones);
+    setWorkingHipsY(sampled.hipsOffsetY);
+  }, []);
 
   const handleTogglePlay = useCallback(() => {
     if (isPlaying) {
-      const sampled = sampleMotionPresetToPose(draft, playhead);
+      const activePreset =
+        compareOriginal && builtInOriginalPreset ? builtInOriginalPreset : draft;
+      const sampled = sampleMotionPresetToPose(activePreset, playhead);
       setWorkingBones(sampled.bones);
       setWorkingHipsY(sampled.hipsOffsetY);
       setIsDirtyPose(false);
       setIsPlaying(false);
       return;
     }
-    if (draft.keyframes.length < 2) return;
+    let playableDraft = draft;
+    if (draft.keyframes.length === 1) {
+      const onlyKf = draft.keyframes[0];
+      const nextTime = onlyKf.time > 0.5 ? 0 : 1;
+      const secondBones: Record<string, BonePoseAngles> = {};
+      for (const [k, v] of Object.entries(workingBones)) {
+        secondBones[k] = [v[0], v[1], v[2]];
+      }
+      playableDraft = {
+        ...draft,
+        keyframes: [
+          onlyKf,
+          {
+            id: uid(),
+            time: nextTime,
+            bones: Object.keys(secondBones).length > 0 ? secondBones : { ...onlyKf.bones },
+            hipsOffsetY: workingHipsY,
+          },
+        ].sort((a, b) => a.time - b.time),
+        updatedAt: new Date().toISOString(),
+      };
+      setDraft(playableDraft);
+    } else if (draft.keyframes.length === 0) {
+      return;
+    }
     const startNorm = playhead >= 0.98 ? 0 : playhead;
     playStartNormRef.current = startNorm;
     if (startNorm !== playhead) {
       setPlayhead(0);
     }
     setIsPlaying(true);
-  }, [draft, isPlaying, playhead]);
+  }, [
+    compareOriginal,
+    builtInOriginalPreset,
+    draft,
+    isPlaying,
+    playhead,
+    workingBones,
+    workingHipsY,
+  ]);
 
   const handleSaveKeyframe = useCallback(() => {
     setIsPlaying(false);
@@ -989,10 +1048,22 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
     flashToast(`Saved variation "${finalized.name}"`);
   };
 
-  const handleLoadPreset = (preset: CustomMotionPreset) => {
+  const handleLoadPreset = (preset: CustomMotionPreset, autoPlay = true) => {
     const cloned: CustomMotionPreset = JSON.parse(JSON.stringify(preset));
+    if (cloned.keyframes.length === 1) {
+      const onlyKf = cloned.keyframes[0];
+      cloned.keyframes = [
+        onlyKf,
+        {
+          id: uid(),
+          time: onlyKf.time > 0.5 ? 0 : 1,
+          bones: { ...onlyKf.bones },
+          hipsOffsetY: onlyKf.hipsOffsetY ?? 0,
+        },
+      ].sort((a, b) => a.time - b.time);
+    }
+    playStartNormRef.current = 0;
     setStudioMode('pose');
-    setIsPlaying(false);
     setCompareOriginal(false);
     setDraft(cloned);
     setSavedPresetId(cloned.id);
@@ -1001,6 +1072,7 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
     setWorkingBones(startSample.bones);
     setWorkingHipsY(startSample.hipsOffsetY);
     setIsDirtyPose(false);
+    setIsPlaying(autoPlay && cloned.keyframes.length >= 2);
   };
 
   const handleRevealPremadeSlot = (slot: CustomClipSlot, autoPlay = false) => {
@@ -1746,7 +1818,8 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
                 </div>
                 <div className="space-y-1.5 max-h-64 overflow-y-auto maker-scroll pr-0.5">
                   {revealedSlots.map((meta) => {
-                    const active = draft.slot === meta.slot;
+                    const active = savedPresetId === null && draft.slot === meta.slot;
+                    const playingThis = active && isPlaying && studioMode === 'pose';
                     const assignedId = resolvedActorLibrary.defaultSlotPresets?.[meta.slot];
                     const assignedPreset = assignedId
                       ? savedPresets.find((p) => p.id === assignedId)
@@ -1761,7 +1834,17 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
                         }`}
                       >
                         <div className="flex items-center justify-between gap-1.5">
-                          <div className="min-w-0 flex-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (active && studioMode === 'pose') {
+                                handleTogglePlay();
+                              } else {
+                                handleRevealPremadeSlot(meta.slot, true);
+                              }
+                            }}
+                            className="min-w-0 flex-1 text-left"
+                          >
                             <div className="text-xs font-extrabold truncate text-slate-900 dark:text-white">
                               {meta.label}
                             </div>
@@ -1769,7 +1852,7 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
                               {assignedPreset ? `Assigned: ${assignedPreset.name}` : 'Built-in'} ·{' '}
                               {meta.defaultDuration}s · {meta.loop ? 'Loop' : 'Once'}
                             </div>
-                          </div>
+                          </button>
                           <div className="flex items-center gap-1 shrink-0">
                             {assignedPreset && (
                               <button
@@ -1783,10 +1866,21 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
                             )}
                             <button
                               type="button"
-                              onClick={() => handleRevealPremadeSlot(meta.slot, true)}
-                              className="px-2 py-1 rounded-lg bg-[#7C5CFF] hover:bg-[#6A48F5] text-white text-[10px] font-bold whitespace-nowrap"
+                              onClick={() => {
+                                if (active && studioMode === 'pose') {
+                                  handleTogglePlay();
+                                } else {
+                                  handleRevealPremadeSlot(meta.slot, true);
+                                }
+                              }}
+                              className={`px-2 py-1 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 whitespace-nowrap ${
+                                playingThis
+                                  ? 'bg-[#F59E0B] text-slate-950'
+                                  : 'bg-[#7C5CFF] hover:bg-[#6A48F5] text-white'
+                              }`}
                             >
-                              Load &amp; Edit
+                              {playingThis ? <Pause size={10} /> : <Play size={10} />}
+                              <span>{playingThis ? 'Playing' : 'Play'}</span>
                             </button>
                           </div>
                         </div>
@@ -1812,7 +1906,7 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
 
                 {savedPresets.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-slate-300 dark:border-white/[0.1] p-3 text-[11px] text-slate-500 dark:text-[#949BB0] leading-relaxed">
-                    Click <strong className="text-slate-700 dark:text-white">Load &amp; Edit</strong> on any
+                    Click <strong className="text-slate-700 dark:text-white">Play</strong> on any
                     premade move above, tweak keyframes on the timeline, then click{' '}
                     <strong className="text-slate-700 dark:text-white">Save Preset</strong> or{' '}
                     <strong className="text-slate-700 dark:text-white">Assign</strong>.
@@ -1821,6 +1915,7 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
                   <div className="space-y-1.5">
                     {savedPresets.map((preset) => {
                       const isEditing = savedPresetId === preset.id;
+                      const playingThis = isEditing && isPlaying && studioMode === 'pose';
                       const isDefault = resolvedActorLibrary.defaultSlotPresets?.[preset.slot] === preset.id;
                       const slotShort =
                         SLOT_OPTIONS.find((s) => s.slot === preset.slot)?.short ?? preset.slot;
@@ -1836,13 +1931,37 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
                           <div className="flex items-center justify-between gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleLoadPreset(preset)}
+                              onClick={() => {
+                                if (isEditing && studioMode === 'pose') {
+                                  handleTogglePlay();
+                                } else {
+                                  handleLoadPreset(preset, true);
+                                }
+                              }}
                               className="min-w-0 flex-1 text-left"
                             >
                               <div className="text-xs font-extrabold truncate">{preset.name}</div>
                               <div className="text-[10px] text-slate-500 dark:text-[#949BB0] tabular-nums">
                                 {slotShort} · {preset.duration.toFixed(1)}s · {preset.keyframes.length} keys
                               </div>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (isEditing && studioMode === 'pose') {
+                                  handleTogglePlay();
+                                } else {
+                                  handleLoadPreset(preset, true);
+                                }
+                              }}
+                              title={playingThis ? 'Pause variation' : 'Play variation'}
+                              className={`p-1.5 rounded-lg text-[10px] font-bold shrink-0 ${
+                                playingThis
+                                  ? 'bg-[#F59E0B] text-slate-950'
+                                  : 'bg-[#7C5CFF] hover:bg-[#6A48F5] text-white'
+                              }`}
+                            >
+                              {playingThis ? <Pause size={10} /> : <Play size={10} />}
                             </button>
                             <button
                               type="button"
@@ -1910,7 +2029,7 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
             containerClassName="w-full h-full"
             onSelectPoseBone={handleSelectBone}
             onGizmoRotateBone={handleChangeBoneAngles}
-            onPlayheadTick={setPlayhead}
+            onPlayheadTick={handlePlayheadTick}
             captureLivePoseRef={captureLivePoseRef}
             capturePoseThumbnailRef={capturePoseThumbnailRef}
             onRuntimeReady={(info) => {
@@ -2948,7 +3067,7 @@ export const MotionStage: React.FC<{ store: MakerStore }> = ({ store }) => {
               <button
                 type="button"
                 onClick={handleTogglePlay}
-                disabled={sortedKeyframes.length < 2}
+                disabled={sortedKeyframes.length === 0}
                 className={`min-w-[104px] px-3 py-1.5 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-40 ${
                   isPlaying
                     ? 'bg-[#F59E0B] text-slate-950'

@@ -15,6 +15,7 @@ import {
   disposeObject3D,
   setupSceneEnvironment,
 } from '../../three/islandScene';
+import { isWebGPUFallbackAdapter } from '../../three/webglUtils';
 import {
   getBoneWorldPosition,
   type RigTestOverride,
@@ -349,6 +350,7 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
     onionSkin,
     showGizmo,
     showJointDots,
+    gizmoSize,
     gizmoAxisFilter,
     lockCameraOrbit,
     contextProps,
@@ -377,6 +379,7 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
     onionSkin,
     showGizmo,
     showJointDots,
+    gizmoSize,
     gizmoAxisFilter,
     lockCameraOrbit,
     contextProps,
@@ -580,7 +583,7 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
     if (!container) return;
 
     const isSoftwareGl = detectSoftwareGl();
-    const renderer = createMakerRenderer(isSoftwareGl);
+    let renderer = createMakerRenderer(isSoftwareGl);
     renderer.setSize(container.clientWidth || 640, container.clientHeight || 360);
     renderer.domElement.style.touchAction = 'none';
     container.innerHTML = '';
@@ -604,27 +607,32 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
     scene.add(gizmoTarget);
 
     const detachedGizmoHandles: { parent: THREE.Object3D; child: THREE.Object3D }[] = [];
-    const transformControls = new TransformControls(camera, renderer.domElement);
-    transformControls.setMode('rotate');
-    transformControls.setSpace('local');
-    transformControls.setSize(gizmoSize);
-    upgradeRotateGizmoForTouch(transformControls);
-    applyAxisFilterToGizmo(
-      transformControls,
-      stateRef.current.gizmoAxisFilter,
-      detachedGizmoHandles
-    );
-    const gizmoHelper = transformControls.getHelper();
-    gizmoHelper.renderOrder = 1000;
-    scene.add(gizmoHelper);
+    const createRigTransformControls = (domEl: HTMLElement) => {
+      const tc = new TransformControls(camera, domEl);
+      tc.setMode('rotate');
+      tc.setSpace('local');
+      tc.setSize(stateRef.current.gizmoSize);
+      upgradeRotateGizmoForTouch(tc);
+      applyAxisFilterToGizmo(tc, stateRef.current.gizmoAxisFilter, detachedGizmoHandles);
+      const helper = tc.getHelper();
+      helper.renderOrder = 1000;
+      scene.add(helper);
+      return tc;
+    };
 
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.set(0, 0.95, 0);
-    controls.enableDamping = !isSoftwareGl;
-    controls.minDistance = 0.85;
-    controls.maxDistance = 12;
-    controls.enabled = !stateRef.current.lockCameraOrbit;
-    controls.update();
+    const createRigOrbitControls = (domEl: HTMLElement) => {
+      const oc = new OrbitControls(camera, domEl);
+      oc.target.set(0, 0.95, 0);
+      oc.enableDamping = !isSoftwareGl;
+      oc.minDistance = 0.85;
+      oc.maxDistance = 12;
+      oc.enabled = !stateRef.current.lockCameraOrbit;
+      oc.update();
+      return oc;
+    };
+
+    let transformControls = createRigTransformControls(renderer.domElement);
+    let controls = createRigOrbitControls(renderer.domElement);
 
     const hemi = new THREE.HemisphereLight('#DCEBFF', '#293042', 0.95);
     const key = new THREE.DirectionalLight('#FFF5E0', 1.85);
@@ -879,6 +887,7 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
     let lastDriverText = '';
     let lastTestText: string | null = null;
     let lastPlayheadEmit = 0;
+    let lastEmittedPlayhead = -1;
     const timer = new THREE.Timer();
 
     function afterDraw(cb: () => void) {
@@ -926,12 +935,27 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
           inst.update(0, 1);
         }
 
-        if (cur.poseMode && cur.motionPlaying && inst.proceduralRig) {
+        const isPresetPreviewPlaying =
+          cur.testOverride?.kind === 'presetPreview' && cur.testOverride.playing;
+        if (
+          (cur.motionPlaying || isPresetPreviewPlaying) &&
+          inst.proceduralRig &&
+          (cur.poseMode || cur.testOverride?.kind === 'presetPreview')
+        ) {
           const now = performance.now();
-          if (now - lastPlayheadEmit > 34) {
+          const norm = inst.proceduralRig.getPreviewTimeNorm();
+          if (
+            now - lastPlayheadEmit > 34 ||
+            lastEmittedPlayhead < 0 ||
+            Math.abs(norm - lastEmittedPlayhead) > 0.015
+          ) {
             lastPlayheadEmit = now;
-            cur.onPlayheadTick(inst.proceduralRig.getPreviewTimeNorm());
+            lastEmittedPlayhead = norm;
+            cur.onPlayheadTick(norm);
           }
+        } else {
+          lastPlayheadEmit = 0;
+          lastEmittedPlayhead = -1;
         }
 
         const driverLabel =
@@ -1057,14 +1081,75 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
       else frameId = requestAnimationFrame(tick);
     }
 
-    void (async () => {
+    const switchToWebGLFallback = async (): Promise<boolean> => {
+      if (!active) return false;
+      cancelAnimationFrame(frameId);
+      clearTimeout(frameId);
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+      renderer.domElement.removeEventListener('pointermove', onPointerMove);
+      renderer.domElement.removeEventListener('pointerup', onPointerUp);
+      transformControls.removeEventListener('dragging-changed', onGizmoDraggingChanged);
+      transformControls.removeEventListener('objectChange', onGizmoObjectChange);
+      applyAxisFilterToGizmo(transformControls, 'all', detachedGizmoHandles);
+      transformControls.detach();
+      scene.remove(transformControls.getHelper());
+      transformControls.dispose();
+      controls.removeEventListener('start', cancelCamGoal);
+      controls.dispose();
+      envTex?.dispose();
+      envTex = null;
+      try {
+        renderer.dispose();
+      } catch {
+        // ignore dispose errors on failed adapter
+      }
+
+      renderer = createMakerRenderer(isSoftwareGl, true);
+      renderer.setSize(container.clientWidth || 640, container.clientHeight || 360);
+      renderer.domElement.style.touchAction = 'none';
+      container.innerHTML = '';
+      container.appendChild(renderer.domElement);
+
+      transformControls = createRigTransformControls(renderer.domElement);
+      transformControls.addEventListener('dragging-changed', onGizmoDraggingChanged);
+      transformControls.addEventListener('objectChange', onGizmoObjectChange);
+      controls = createRigOrbitControls(renderer.domElement);
+      controls.addEventListener('start', cancelCamGoal);
+      renderer.domElement.addEventListener('pointerdown', onPointerDown);
+      renderer.domElement.addEventListener('pointermove', onPointerMove);
+      renderer.domElement.addEventListener('pointerup', onPointerUp);
+      refs.renderer = renderer;
+      refs.transformControls = transformControls;
+      refs.controls = controls;
+
       try {
         await renderer.init();
-      } catch {
-        // ignore if unmounted
+        if (!active) return false;
+        return true;
+      } catch (err) {
+        console.warn('RigPreviewStage WebGL fallback init failed:', err);
+        return false;
       }
-      if (!active) return;
-      envTex = setupSceneEnvironment(scene, renderer);
+    };
+
+    void (async () => {
+      let ok = false;
+      try {
+        await renderer.init();
+        if (!isSoftwareGl && isWebGPUFallbackAdapter(renderer)) {
+          ok = await switchToWebGLFallback();
+        } else {
+          ok = true;
+        }
+      } catch {
+        ok = await switchToWebGLFallback();
+      }
+      if (!active || !ok) return;
+      try {
+        envTex = setupSceneEnvironment(scene, renderer);
+      } catch {
+        envTex = null;
+      }
       tick();
     })();
 
@@ -1351,7 +1436,10 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
       inst.setAction(cur.previewSlot, 0.05);
       if (cur.testOverride) {
         inst.setTestOverride(cur.testOverride);
-        if (cur.testOverride.kind === 'poseSnapshot') {
+        if (
+          cur.testOverride.kind === 'poseSnapshot' ||
+          cur.testOverride.kind === 'presetPreview'
+        ) {
           inst.update(0, 1);
         }
       }
@@ -1500,7 +1588,7 @@ export const RigPreviewStage: React.FC<RigPreviewStageProps> = ({
     const refs = stageRef.current;
     if (!refs?.instance) return;
     refs.instance.setTestOverride(testOverride);
-    if (testOverride?.kind === 'poseSnapshot') {
+    if (testOverride?.kind === 'poseSnapshot' || testOverride?.kind === 'presetPreview') {
       refs.instance.update(0, 1);
     }
   }, [testOverride]);

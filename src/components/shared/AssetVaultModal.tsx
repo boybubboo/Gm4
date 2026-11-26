@@ -282,17 +282,23 @@ export const AssetVaultModal: React.FC<{
   }, [cachedInfo]);
 
   const isMotionMode = inspectorTab === 'motion' && boneNames.length > 0;
+  const playStartNormRef = useRef<number>(0);
+  const activeMotionDraftRef = useRef<CustomMotionPreset>(motionDraft);
+  activeMotionDraftRef.current = motionDraft;
+
+  const playingMotionOverride: RigTestOverride = useMemo(() => {
+    if (!isMotionMode || !motionPlaying || motionDraft.keyframes.length < 2) return null;
+    return {
+      kind: 'presetPreview',
+      preset: motionDraft,
+      timeNorm: playStartNormRef.current,
+      playing: true,
+    };
+  }, [isMotionMode, motionPlaying, motionDraft]);
 
   const effectiveTestOverride: RigTestOverride = useMemo(() => {
     if (isMotionMode) {
-      if (motionPlaying && motionDraft.keyframes.length >= 2) {
-        return {
-          kind: 'presetPreview',
-          preset: motionDraft,
-          timeNorm: motionPlayhead,
-          playing: true,
-        };
-      }
+      if (playingMotionOverride) return playingMotionOverride;
       return {
         kind: 'poseSnapshot',
         bones: workingBones,
@@ -300,7 +306,7 @@ export const AssetVaultModal: React.FC<{
       };
     }
     return testOverride;
-  }, [isMotionMode, motionPlaying, motionDraft, motionPlayhead, workingBones, workingHipsY, testOverride]);
+  }, [isMotionMode, playingMotionOverride, workingBones, workingHipsY, testOverride]);
 
   const ghostStartPose = useMemo(() => {
     if (!isMotionMode || !showLoopGhost || !motionDraft.loop) return null;
@@ -394,19 +400,30 @@ export const AssetVaultModal: React.FC<{
     [motionDraft]
   );
 
+  const handlePlayheadTick = useCallback((timeNorm: number) => {
+    setMotionPlayhead(timeNorm);
+    const sampled = sampleMotionPresetToPose(activeMotionDraftRef.current, timeNorm);
+    setWorkingBones(sampled.bones);
+    setWorkingHipsY(sampled.hipsOffsetY);
+  }, []);
+
   const handleToggleMotionPlay = useCallback(() => {
-    setMotionPlaying((playing) => {
-      if (playing) {
-        const sampled = sampleMotionPresetToPose(motionDraft, motionPlayhead);
-        setWorkingBones(sampled.bones);
-        setWorkingHipsY(sampled.hipsOffsetY);
-        setIsDirtyPose(false);
-        return false;
-      }
-      if (motionDraft.keyframes.length < 2) return false;
-      return true;
-    });
-  }, [motionDraft, motionPlayhead]);
+    if (motionPlaying) {
+      const sampled = sampleMotionPresetToPose(motionDraft, motionPlayhead);
+      setWorkingBones(sampled.bones);
+      setWorkingHipsY(sampled.hipsOffsetY);
+      setIsDirtyPose(false);
+      setMotionPlaying(false);
+      return;
+    }
+    if (motionDraft.keyframes.length < 2) return;
+    const startNorm = motionPlayhead >= 0.98 ? 0 : motionPlayhead;
+    playStartNormRef.current = startNorm;
+    if (startNorm !== motionPlayhead) {
+      setMotionPlayhead(0);
+    }
+    setMotionPlaying(true);
+  }, [motionDraft, motionPlayhead, motionPlaying]);
 
   const handleSaveKeyframe = useCallback(() => {
     setMotionPlaying(false);
@@ -1004,7 +1021,7 @@ export const AssetVaultModal: React.FC<{
                   ghostStartPose={ghostStartPose}
                   onSelectPoseBone={handleSelectPoseBone}
                   onGizmoRotateBone={handleChangePoseBoneAngles}
-                  onPlayheadTick={setMotionPlayhead}
+                  onPlayheadTick={handlePlayheadTick}
                   captureLivePoseRef={captureLivePoseRef}
                   onDriverChange={setActiveDriverLabel}
                   onTestStatusChange={setLiveTestStatus}
